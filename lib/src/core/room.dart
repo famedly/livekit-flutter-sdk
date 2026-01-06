@@ -588,7 +588,7 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
         trackSid = streamId;
       }
 
-      logger.warning(
+      logger.finest(
           '[audioElementLogs] starting _getRemoteParticipantBySid for $participantSid for $trackSid or $streamId');
 
       RemoteParticipant? rp = _getRemoteParticipantBySid(participantSid);
@@ -596,7 +596,7 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
       if (rp == null) {
         for (var i = 0; i < 5; i++) {
           if (rp != null) break;
-          logger.warning('[audioElementLogs] _getRemoteParticipantBySid try: $i, sid: $participantSid');
+          logger.finest('[audioElementLogs] _getRemoteParticipantBySid try: $i, sid: $participantSid');
           await Future.delayed(Duration(seconds: i));
           rp = _getRemoteParticipantBySid(participantSid);
         }
@@ -663,10 +663,10 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
   }
 
   RemoteParticipant? _getRemoteParticipantBySid(String sid) {
-    logger.warning('[audioElementLogs] [_getRemoteParticipantBySid] sid: $sid');
+    logger.finest('[audioElementLogs] [_getRemoteParticipantBySid] sid: $sid');
     final identity = _sidToIdentity[sid];
-    logger.warning('[audioElementLogs] [_getRemoteParticipantBySid] _sidToIdentity: $_sidToIdentity');
-    logger.warning('[audioElementLogs] [_getRemoteParticipantBySid] identity: $identity');
+    logger.finest('[audioElementLogs] [_getRemoteParticipantBySid] _sidToIdentity: $_sidToIdentity');
+    logger.finest('[audioElementLogs] [_getRemoteParticipantBySid] identity: $identity');
     if (identity != null) {
       return remoteParticipants[identity];
     } else {
@@ -677,7 +677,7 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
   Future<ParticipantCreationResult> _getOrCreateRemoteParticipant(
       String identity, lk_models.ParticipantInfo? info) async {
     RemoteParticipant? participant = _remoteParticipants[identity];
-    logger.warning('[audioElementLogs] _getOrCreateRemoteParticipant about to update _sidIdentity');
+    logger.finest('[audioElementLogs] _getOrCreateRemoteParticipant about to update _sidIdentity');
 
     if (participant != null) {
       // Return existing participant with no new publications; caller handles updates.
@@ -687,7 +687,7 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
       );
     }
 
-    logger.warning('[audioElementLogs] _getOrCreateRemoteParticipant 1 about to update _sidIdentity');
+    logger.finest('[audioElementLogs] _getOrCreateRemoteParticipant 1 about to update _sidIdentity');
 
     ParticipantCreationResult result;
     if (info == null) {
@@ -710,7 +710,7 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
     }
 
     _remoteParticipants[result.participant.identity] = result.participant;
-    logger.warning(
+    logger.finest(
         '[audioElementLogs] _getOrCreateRemoteParticipant 2 about to update _sidIdentity with ${result.participant.sid}');
 
     _sidToIdentity[result.participant.sid] = result.participant.identity;
@@ -722,7 +722,7 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
     // trigger change notifier only if list of participants membership is changed
     var hasChanged = false;
     for (final info in updates) {
-      logger.warning('[audioElementLogs] _onParticipantUpdateEvent about to update _sidIdentity with ${info.sid}');
+      logger.finest('[audioElementLogs] _onParticipantUpdateEvent about to update _sidIdentity with ${info.sid}');
 
       // The local participant is not ready yet, waiting for the
       // `RoomConnectedEvent` to create the local participant.
@@ -760,14 +760,14 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
             [result.participant.events, events].emit(event);
           }
         }
-        logger.warning('[audioElementLogs] _onParticipantUpdateEvent 1 about to update _sidIdentity with ${info.sid}');
+        logger.finest('[audioElementLogs] _onParticipantUpdateEvent 1 about to update _sidIdentity with ${info.sid}');
 
         _sidToIdentity[info.sid] = info.identity;
       } else {
         final wasUpdated = await result.participant.updateFromInfo(info);
         if (wasUpdated) {
           logger
-              .warning('[audioElementLogs] _onParticipantUpdateEvent 2 about to update _sidIdentity with ${info.sid}');
+              .finest('[audioElementLogs] _onParticipantUpdateEvent 2 about to update _sidIdentity with ${info.sid}');
           _sidToIdentity[info.sid] = info.identity;
         }
       }
@@ -854,7 +854,7 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
 
   void _onSignalStreamStateUpdateEvent(List<lk_rtc.StreamStateInfo> updates) async {
     for (final update in updates) {
-      logger.warning(
+      logger.finest(
           '[audioElementLogs] _onSignalStreamStateUpdateEvent about to update _sidIdentity with ${update.participantSid}');
       final identity = _sidToIdentity[update.participantSid];
       if (identity == null) {
