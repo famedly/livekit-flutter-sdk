@@ -35,6 +35,10 @@ enum ProtocolVersion {
   v10,
   v11,
   v12,
+  v13, // Regions in leave request, canReconnect obsoleted by action
+  v14,
+  v15, // Non-error signal responses, room move
+  v16, // Supports moving (full participant move)
 }
 
 /// Connection state type used throughout the SDK.
@@ -141,11 +145,21 @@ class RTCConfiguration {
   final RTCIceTransportPolicy? iceTransportPolicy;
   final bool? encodedInsertableStreams;
 
+  /// Allows DSCP (Differentiated Services Code Point) codes to be set on
+  /// outgoing packets for network level QoS.
+  ///
+  /// This is a best effort hint and network routers may ignore DSCP markings.
+  /// Required for `networkPriority` to take effect.
+  ///
+  /// Ignored on web platforms.
+  final bool? isDscpEnabled;
+
   const RTCConfiguration({
     this.iceCandidatePoolSize,
     this.iceServers,
     this.iceTransportPolicy,
     this.encodedInsertableStreams,
+    this.isDscpEnabled,
   });
 
   Map<String, dynamic> toMap() {
@@ -158,6 +172,7 @@ class RTCConfiguration {
       // only supports unified plan
       'sdpSemantics': 'unified-plan',
       if (encodedInsertableStreams != null) 'encodedInsertableStreams': encodedInsertableStreams,
+      if (isDscpEnabled != null) 'enableDscp': isDscpEnabled,
       if (iceServersMap.isNotEmpty) 'iceServers': iceServersMap,
       if (iceCandidatePoolSize != null) 'iceCandidatePoolSize': iceCandidatePoolSize,
       if (iceTransportPolicy != null) 'iceTransportPolicy': iceTransportPolicy!.toStringValue(),
@@ -170,12 +185,14 @@ class RTCConfiguration {
     List<RTCIceServer>? iceServers,
     RTCIceTransportPolicy? iceTransportPolicy,
     bool? encodedInsertableStreams,
+    bool? isDscpEnabled,
   }) =>
       RTCConfiguration(
         iceCandidatePoolSize: iceCandidatePoolSize ?? this.iceCandidatePoolSize,
         iceServers: iceServers ?? this.iceServers,
         iceTransportPolicy: iceTransportPolicy ?? this.iceTransportPolicy,
         encodedInsertableStreams: encodedInsertableStreams ?? this.encodedInsertableStreams,
+        isDscpEnabled: isDscpEnabled ?? this.isDscpEnabled,
       );
 }
 

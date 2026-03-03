@@ -5,6 +5,7 @@ import 'package:dropdown_button2/dropdown_button2.dart';
 import 'package:flutter/material.dart';
 import 'package:livekit_client/livekit_client.dart';
 import 'package:livekit_example/exts.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../theme.dart';
 import 'room.dart';
@@ -43,6 +44,9 @@ class PreJoinPage extends StatefulWidget {
 }
 
 class _PreJoinPageState extends State<PreJoinPage> {
+  static const _prefKeyEnableVideo = 'prejoin-enable-video';
+  static const _prefKeyEnableAudio = 'prejoin-enable-audio';
+
   List<MediaDevice> _audioInputs = [];
   List<MediaDevice> _videoInputs = [];
   StreamSubscription? _subscription;
@@ -60,8 +64,14 @@ class _PreJoinPageState extends State<PreJoinPage> {
   @override
   void initState() {
     super.initState();
+    unawaited(_initStateAsync());
+  }
+
+  Future<void> _initStateAsync() async {
+    await _readPrefs();
     _subscription = Hardware.instance.onDeviceChange.stream.listen(_loadDevices);
-    unawaited(Hardware.instance.enumerateDevices().then(_loadDevices));
+    final devices = await Hardware.instance.enumerateDevices();
+    await _loadDevices(devices);
   }
 
   @override
@@ -70,38 +80,60 @@ class _PreJoinPageState extends State<PreJoinPage> {
     super.deactivate();
   }
 
-  void _loadDevices(List<MediaDevice> devices) async {
+  Future<void> _loadDevices(List<MediaDevice> devices) async {
     _audioInputs = devices.where((d) => d.kind == 'audioinput').toList();
     _videoInputs = devices.where((d) => d.kind == 'videoinput').toList();
 
-    if (_audioInputs.isNotEmpty) {
+    if (_selectedAudioDevice != null && !_audioInputs.contains(_selectedAudioDevice)) {
+      _selectedAudioDevice = null;
+    }
+    if (_audioInputs.isEmpty) {
+      await _audioTrack?.stop();
+      _audioTrack = null;
+    }
+    if (_selectedVideoDevice != null && !_videoInputs.contains(_selectedVideoDevice)) {
+      _selectedVideoDevice = null;
+    }
+    if (_videoInputs.isEmpty) {
+      await _videoTrack?.stop();
+      _videoTrack = null;
+    }
+
+    if (_enableAudio && _audioInputs.isNotEmpty) {
       if (_selectedAudioDevice == null) {
         _selectedAudioDevice = _audioInputs.first;
         Future.delayed(const Duration(milliseconds: 100), () async {
+          if (!mounted) return;
           await _changeLocalAudioTrack();
-          setState(() {});
+          if (mounted) setState(() {});
         });
       }
     }
 
-    if (_videoInputs.isNotEmpty) {
+    if (_enableVideo && _videoInputs.isNotEmpty) {
       if (_selectedVideoDevice == null) {
         _selectedVideoDevice = _videoInputs.first;
         Future.delayed(const Duration(milliseconds: 100), () async {
+          if (!mounted) return;
           await _changeLocalVideoTrack();
-          setState(() {});
+          if (mounted) setState(() {});
         });
       }
     }
-    setState(() {});
+    if (mounted) setState(() {});
   }
 
   Future<void> _setEnableVideo(value) async {
     _enableVideo = value;
+    await _writePrefs();
     if (!_enableVideo) {
       await _videoTrack?.stop();
       _videoTrack = null;
+      _selectedVideoDevice = null;
     } else {
+      if (_selectedVideoDevice == null && _videoInputs.isNotEmpty) {
+        _selectedVideoDevice = _videoInputs.first;
+      }
       await _changeLocalVideoTrack();
     }
     setState(() {});
@@ -109,16 +141,22 @@ class _PreJoinPageState extends State<PreJoinPage> {
 
   Future<void> _setEnableAudio(value) async {
     _enableAudio = value;
+    await _writePrefs();
     if (!_enableAudio) {
       await _audioTrack?.stop();
       _audioTrack = null;
+      _selectedAudioDevice = null;
     } else {
+      if (_selectedAudioDevice == null && _audioInputs.isNotEmpty) {
+        _selectedAudioDevice = _audioInputs.first;
+      }
       await _changeLocalAudioTrack();
     }
     setState(() {});
   }
 
   Future<void> _changeLocalAudioTrack() async {
+    if (!_enableAudio) return;
     if (_audioTrack != null) {
       await _audioTrack!.stop();
       _audioTrack = null;
@@ -135,6 +173,7 @@ class _PreJoinPageState extends State<PreJoinPage> {
   }
 
   Future<void> _changeLocalVideoTrack() async {
+    if (!_enableVideo) return;
     if (_videoTrack != null) {
       await _videoTrack!.stop();
       _videoTrack = null;
@@ -229,7 +268,7 @@ class _PreJoinPageState extends State<PreJoinPage> {
       if (!context.mounted) return;
       await Navigator.push<void>(
         context,
-        MaterialPageRoute(builder: (_) => RoomPage(room, listener)),
+        MaterialPageRoute(builder: (_) => RoomPage(room, listener, fastConnection: true)),
       );
     } catch (error) {
       print('Could not connect $error');
@@ -247,6 +286,20 @@ class _PreJoinPageState extends State<PreJoinPage> {
     await _setEnableAudio(false);
     if (!context.mounted) return;
     Navigator.of(context).pop();
+  }
+
+  Future<void> _readPrefs() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      _enableVideo = prefs.getBool(_prefKeyEnableVideo) ?? true;
+      _enableAudio = prefs.getBool(_prefKeyEnableAudio) ?? true;
+    });
+  }
+
+  Future<void> _writePrefs() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_prefKeyEnableVideo, _enableVideo);
+    await prefs.setBool(_prefKeyEnableAudio, _enableAudio);
   }
 
   @override
@@ -401,7 +454,7 @@ class _PreJoinPageState extends State<PreJoinPage> {
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      const Text('Micriphone:'),
+                      const Text('Microphone:'),
                       Switch(
                         value: _enableAudio,
                         onChanged: (value) => _setEnableAudio(value),
@@ -416,7 +469,7 @@ class _PreJoinPageState extends State<PreJoinPage> {
                       isExpanded: true,
                       disabledHint: const Text('Disable Microphone'),
                       hint: const Text(
-                        'Select Micriphone',
+                        'Select Microphone',
                       ),
                       items: _enableAudio
                           ? _audioInputs

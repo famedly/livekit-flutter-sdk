@@ -13,9 +13,8 @@
 // limitations under the License.
 
 import 'dart:async';
-import 'dart:typed_data';
 
-import 'package:flutter/services.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 
 import 'package:flutter_webrtc/flutter_webrtc.dart' as webrtc;
 import 'package:uuid/uuid.dart';
@@ -25,16 +24,26 @@ import '../events.dart';
 import '../logger.dart';
 import '../participant/local.dart';
 import '../support/byte_ring_buffer.dart';
-import '../support/native.dart';
 import '../support/reusable_completer.dart';
 import '../track/local/audio.dart';
 import '../types/data_stream.dart';
 import '../types/other.dart';
 import '../types/participant_state.dart';
+import 'audio_frame_capture.dart';
 
 typedef PreConnectOnError = void Function(Object error);
 
+/// Captures and buffers microphone audio before a room connection completes.
+///
+/// This is used by `Room.withPreConnectAudio` to reduce perceived latency for
+/// voice agent experiences: the microphone can begin recording while the app is
+/// still connecting and dispatching an agent, then the buffered audio is sent
+/// once the agent becomes active.
+///
+/// Audio is buffered in memory and bounded by [defaultMaxSize].
+/// If it overflows, the oldest audio is dropped until the agent is ready.
 class PreConnectAudioBuffer {
+  /// Topic used to send the buffered audio stream to agents.
   static const String dataTopic = 'lk.agent.pre-connect-audio-buffer';
 
   static const int defaultMaxSize = 10 * 1024 * 1024; // 10MB
@@ -47,15 +56,15 @@ class PreConnectAudioBuffer {
   // Internal states
   bool _isRecording = false;
   bool _isBufferSent = false;
-  String? _rendererId;
 
   LocalAudioTrack? _localTrack;
-  EventChannel? _eventChannel;
+  AudioFrameCapture? _audioCapture;
   StreamSubscription? _streamSubscription;
 
-  final PreConnectOnError? _onError;
+  PreConnectOnError? _onError;
   final int _requestSampleRate;
   int? _renderedSampleRate;
+  int? _renderedChannels;
 
   bool _nativeRecordingStarted = false;
   bool _hasLoggedOverflow = false;
@@ -72,16 +81,33 @@ class PreConnectAudioBuffer {
   })  : _onError = onError,
         _requestSampleRate = sampleRate;
 
-  // Getters
+  /// Whether pre-connect recording is currently active.
   bool get isRecording => _isRecording;
+
+  /// Number of buffered bytes currently stored.
   int get bufferedSize => _buffer.length;
+
+  /// The local audio track used for recording while pre-connecting.
   LocalAudioTrack? get localTrack => _localTrack;
 
   Future<LocalTrackPublishedEvent>? _localTrackPublishedEvent;
 
-  /// Future that completes when an agent is ready.
+  /// Completes when an agent becomes active and the buffer has been sent.
+  ///
+  /// If the configured timeout elapses before an agent becomes active, this
+  /// future completes with an error.
   Future<void> get agentReadyFuture => _agentReadyManager.future;
 
+  /// Starts capturing audio into an in-memory buffer.
+  ///
+  /// [timeout] controls how long to wait for an agent to become active. When the
+  /// agent becomes active, buffered audio is sent automatically and
+  /// [agentReadyFuture] completes. If the timeout is reached first,
+  /// [agentReadyFuture] completes with an error and callers should [reset] the
+  /// buffer.
+  ///
+  /// Ensure microphone permissions are granted before calling this.
+  /// Audio capture may fail without permissions.
   Future<void> startRecording({
     Duration timeout = const Duration(seconds: 20),
   }) async {
@@ -100,18 +126,17 @@ class PreConnectAudioBuffer {
     final rendererId = Uuid().v4();
     logger.info('Starting audio renderer with rendererId: $rendererId');
 
-    final result = await Native.startAudioRenderer(
-      trackId: _localTrack!.mediaStreamTrack.id!,
+    _audioCapture = createAudioFrameCapture();
+    final result = await _audioCapture!.start(
+      track: _localTrack!.mediaStreamTrack,
       rendererId: rendererId,
-      format: {
-        'commonFormat': 'int16',
-        'sampleRate': _requestSampleRate,
-        'channels': 1,
-      },
+      sampleRate: _requestSampleRate,
+      channels: 1,
+      commonFormat: 'int16',
     );
 
-    if (result != true) {
-      final error = StateError('Failed to start native audio renderer ($result)');
+    if (!result) {
+      final error = StateError('Failed to start audio renderer ($result)');
       logger.severe('[Preconnect audio] $error');
       _onError?.call(error);
       await stopRecording(withError: error);
@@ -120,41 +145,29 @@ class PreConnectAudioBuffer {
       throw error;
     }
 
-    await webrtc.NativeAudioManagement.startLocalRecording();
-    _nativeRecordingStarted = true;
-
-    _rendererId = rendererId;
+    if (!kIsWeb) {
+      await webrtc.NativeAudioManagement.startLocalRecording();
+      _nativeRecordingStarted = true;
+    }
 
     logger.info('startAudioRenderer result: $result');
 
-    _eventChannel = EventChannel('io.livekit.audio.renderer/channel-$rendererId');
-    _streamSubscription = _eventChannel?.receiveBroadcastStream().listen((event) async {
-      if (!_isRecording) {
-        return;
-      }
+    _streamSubscription = _audioCapture!.frameStream.listen((frame) {
+      if (!_isRecording) return;
 
-      try {
-        // Actual sample rate of the audio data, can differ from the request sample rate
-        _renderedSampleRate = event['sampleRate'] as int;
-        final dataChannels = event['data'] as List<dynamic>;
-        final monoData = dataChannels[0].cast<int>();
-        // Convert Int16 values to bytes using typed data view
-        final int16List = Int16List.fromList(monoData);
-        final bytes = int16List.buffer.asUint8List();
+      _renderedSampleRate = frame.sampleRate;
+      _renderedChannels = frame.channels;
 
-        final didOverflow = _buffer.write(bytes);
-        if (didOverflow && !_hasLoggedOverflow) {
-          _hasLoggedOverflow = true;
-          logger.warning(
-            '[Preconnect audio] buffer exceeded ${defaultMaxSize ~/ 1024}KB, dropping oldest audio until agent is ready',
-          );
-        }
-      } catch (e) {
-        logger.warning('[Preconnect audio] Error parsing event: $e');
+      final didOverflow = _buffer.write(frame.data);
+      if (didOverflow && !_hasLoggedOverflow) {
+        _hasLoggedOverflow = true;
+        logger.warning(
+          '[Preconnect audio] buffer exceeded ${defaultMaxSize ~/ 1024}KB, dropping oldest audio until agent is ready',
+        );
       }
     });
 
-    // Listen for agent readiness; when active, attempt to send buffer once.
+    // Listen for agent readiness and send the buffer when active.
     _participantStateListener = _room.events.on<ParticipantStateUpdatedEvent>(
         filter: (event) => event.participant.kind == ParticipantKind.AGENT && event.state == ParticipantState.active,
         (event) async {
@@ -180,6 +193,11 @@ class PreConnectAudioBuffer {
     ));
   }
 
+  /// Stops recording and releases audio capture resources.
+  ///
+  /// If [withError] is provided, [agentReadyFuture] completes with that error.
+  /// Otherwise, [agentReadyFuture] completes successfully (if not already
+  /// completed).
   Future<void> stopRecording({Object? withError}) async {
     if (!_isRecording) return;
     _isRecording = false;
@@ -188,20 +206,12 @@ class PreConnectAudioBuffer {
     await _streamSubscription?.cancel();
     _streamSubscription = null;
 
-    // Dispose the event channel.
-    _eventChannel = null;
+    // Stop the audio capture.
+    await _audioCapture?.stop();
+    _audioCapture = null;
 
-    final rendererId = _rendererId;
-    if (rendererId != null) {
-      await Native.stopAudioRenderer(
-        rendererId: rendererId,
-      );
-    }
-
-    _rendererId = null;
-
-    // Stop native audio when errored
-    if (withError != null && _nativeRecordingStarted) {
+    // Stop native recording session if it was started.
+    if (_nativeRecordingStarted) {
       await webrtc.NativeAudioManagement.stopLocalRecording();
     }
 
@@ -219,7 +229,8 @@ class PreConnectAudioBuffer {
     logger.info('[Preconnect audio] stopped recording');
   }
 
-  // Clean-up & reset for re-use
+  /// Stops recording and clears buffered audio and listeners so the instance
+  /// can be reused.
   Future<void> reset() async {
     await stopRecording();
     _timeoutTimer?.cancel();
@@ -227,7 +238,7 @@ class PreConnectAudioBuffer {
     _participantStateListener = null;
     _buffer.clear();
 
-    // Don't stop the local track - it will continue to be used by the Room
+    // Keep the local track because the Room still uses it.
     _localTrack = null;
 
     _agentReadyManager.reset();
@@ -236,16 +247,25 @@ class PreConnectAudioBuffer {
     // Reset the _isSent flag to allow data sending on next use
     _isBufferSent = false;
     _hasLoggedOverflow = false;
+    _renderedSampleRate = null;
+    _renderedChannels = null;
 
     logger.info('[Preconnect audio] reset');
   }
 
-  // Dispose the audio buffer and clean up all resources.
+  /// Disposes this buffer (alias for [reset]).
   Future<void> dispose() async {
     await reset();
     logger.info('[Preconnect audio] disposed');
   }
 
+  /// Sends the currently buffered audio to one or more agent identities.
+  ///
+  /// This is a one shot operation.
+  /// Repeated calls are ignored after the buffer has been sent.
+  ///
+  /// The stream is written to [topic] (default: [dataTopic]) and includes
+  /// attributes that help the agent interpret the raw audio payload.
   Future<void> sendAudioData({
     required List<String> agents,
     String topic = dataTopic,
@@ -254,9 +274,14 @@ class PreConnectAudioBuffer {
     if (agents.isEmpty) return;
 
     final sampleRate = _renderedSampleRate;
+    final rawChannels = _renderedChannels ?? 1;
+    final channels = rawChannels > 0 ? rawChannels : 1;
     if (sampleRate == null) {
       logger.severe('[Preconnect audio] renderedSampleRate is null');
       return;
+    }
+    if (rawChannels <= 0) {
+      logger.warning('[Preconnect audio] Invalid rendered channels: $rawChannels. Falling back to mono.');
     }
 
     // Wait for local track published event
@@ -280,7 +305,8 @@ class PreConnectAudioBuffer {
       topic: topic,
       attributes: {
         'sampleRate': sampleRate.toString(),
-        'channels': '1',
+        'channels': channels.toString(),
+        'commonFormat': 'int16',
         'trackId': localTrackSid,
       },
       totalSize: data.length,
@@ -294,11 +320,17 @@ class PreConnectAudioBuffer {
     await writer.close();
 
     // Compute seconds of audio data sent
-    final int bytesPerSample = 2; // Assuming 16-bit audio
-    final int totalSamples = data.length ~/ bytesPerSample;
-    final double secondsOfAudio = totalSamples / sampleRate;
+    final int bytesPerSample = 2; // 16-bit audio
+    final int bytesPerFrame = bytesPerSample * channels;
+    final int totalFrames = data.length ~/ bytesPerFrame;
+    final double secondsOfAudio = totalFrames / sampleRate;
 
     logger.info(
         '[Preconnect audio] sent ${(data.length / 1024).toStringAsFixed(1)}KB of audio (${secondsOfAudio.toStringAsFixed(2)} seconds) to ${agents} agent(s)');
+  }
+
+  /// Updates the callback invoked when pre-connect audio fails.
+  void setErrorHandler(PreConnectOnError? onError) {
+    _onError = onError;
   }
 }

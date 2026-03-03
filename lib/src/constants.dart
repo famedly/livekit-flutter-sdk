@@ -16,6 +16,7 @@ class Timeouts {
   final Duration connection;
   final Duration debounce;
   final Duration publish;
+  final Duration subscribe;
   final Duration peerConnection;
   final Duration iceRestart;
 
@@ -23,14 +24,16 @@ class Timeouts {
     required this.connection,
     required this.debounce,
     required this.publish,
+    required this.subscribe,
     required this.peerConnection,
     required this.iceRestart,
   });
 
   static const Timeouts defaultTimeouts = Timeouts(
     connection: Duration(seconds: 10),
-    debounce: Duration(milliseconds: 100),
+    debounce: Duration(milliseconds: 20),
     publish: Duration(seconds: 10),
+    subscribe: Duration(seconds: 10),
     peerConnection: Duration(seconds: 10),
     iceRestart: Duration(seconds: 10),
   );
