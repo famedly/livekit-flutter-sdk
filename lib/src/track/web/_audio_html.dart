@@ -18,6 +18,8 @@ import 'dart:js_interop_unsafe';
 import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
 import 'package:web/web.dart' as web;
 
+import 'package:livekit_client/src/logger.dart';
+
 // ignore: implementation_imports
 import 'package:dart_webrtc/src/media_stream_track_impl.dart'; // import_sorter: keep
 
@@ -29,6 +31,8 @@ Map<String, web.Element> _audioElements = {};
 
 Future<dynamic> startAudio(String id, rtc.MediaStreamTrack track) async {
   if (track is! MediaStreamTrackWeb) {
+    logger.warning(
+        '[audioElementLogs] startAudio failed for track $id because track not a MediaStreamTrackWeb, is actually ${track.runtimeType}');
     return;
   }
 
@@ -42,6 +46,8 @@ Future<dynamic> startAudio(String id, rtc.MediaStreamTrack track) async {
     _audioElements[id] = audioElement;
   }
   if (!audioElement.instanceOfString('HTMLAudioElement')) {
+    logger.warning(
+        '[audioElementLogs] startAudio failed for track $id because audioElement not a HTMLAudioElement, is actually ${audioElement.runtimeType}');
     return;
   }
   final audio = audioElement as web.HTMLAudioElement;

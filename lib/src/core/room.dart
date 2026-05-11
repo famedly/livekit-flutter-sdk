@@ -51,7 +51,7 @@ import '../types/data_stream.dart';
 import '../types/other.dart';
 import '../types/rpc.dart';
 import '../types/transcription_segment.dart';
-import '../utils.dart' show unpackStreamId;
+import '../utils.dart' show isSVCCodec, unpackStreamId;
 import 'engine.dart';
 import 'participant_collection.dart';
 import 'pending_track_queue.dart';
@@ -302,8 +302,8 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
       );
     } catch (e) {
       logger.warning('could not connect to $url $e');
-      if (_regionUrlProvider != null && e is WebSocketException ||
-          (e is ConnectException && e.reason != ConnectionErrorReason.NotAllowed)) {
+      if (_regionUrlProvider != null &&
+          (e is WebSocketException || (e is ConnectException && e.reason != ConnectionErrorReason.NotAllowed))) {
         String? nextUrl;
         try {
           nextUrl = await _regionUrlProvider!.getNextBestRegionUrl();
@@ -363,7 +363,8 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
         }
       } else if (event.subscribedQualities.isNotEmpty) {
         final videoTrack = publication.track as LocalVideoTrack;
-        await videoTrack.updatePublishingLayers(videoTrack, event.subscribedQualities);
+        await videoTrack.setPublishingLayers(videoTrack, event.subscribedQualities,
+            isSVC: isSVCCodec(videoTrack.codec ?? ''));
       }
     })
     ..on<SignalSubscriptionPermissionUpdateEvent>((event) async {
@@ -499,6 +500,7 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
     ..on<EngineResumedEvent>((event) async {
       // re-send tracks permissions
       localParticipant?.sendTrackSubscriptionPermissions();
+      events.emit(const RoomReconnectedEvent());
       notifyListeners();
     })
     ..on<EngineFullRestartingEvent>((event) async {
@@ -536,8 +538,11 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
       notifyListeners();
     })
     ..on<EngineResumingEvent>((event) async {
-      await _sendSyncState();
+      events.emit(const RoomResumingEvent());
       notifyListeners();
+    })
+    ..on<SignalReconnectedEvent>((event) async {
+      await _sendSyncState();
     })
     ..on<EngineAttemptReconnectEvent>((event) async {
       events.emit(RoomAttemptReconnectEvent(
@@ -617,7 +622,19 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
         trackSid = streamId;
       }
 
-      final participant = _remoteParticipants.bySid[participantSid];
+      RemoteParticipant? participant = _remoteParticipants.bySid[participantSid];
+
+      if (participant == null) {
+        logger.warning(
+            '[audioElementLogs] _setupEngineFailed could not find remoteParticipant, will try again, $participantSid');
+
+        for (var i = 0; i < 5; i++) {
+          if (participant != null) break;
+          logger.info('[audioElementLogs] _getRemoteParticipantBySid try: $i, sid: $participantSid');
+          await Future.delayed(Duration(seconds: 1));
+          participant = _remoteParticipants.bySid[participantSid];
+        }
+      }
       try {
         if (trackSid == null || trackSid.isEmpty) {
           throw TrackSubscriptionExceptionEvent(
@@ -628,6 +645,8 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
 
         final shouldDefer = connectionState != ConnectionState.connected || participant == null;
         if (shouldDefer) {
+          logger.warning(
+              '[audioElementLogs] _setupEngineFailed could not find remoteParticipant, will enqueue for later, $participantSid');
           _pendingTrackQueue.enqueue(
             track: event.track,
             stream: event.stream,
@@ -712,6 +731,8 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
     // trigger change notifier only if list of participants membership is changed
     var hasChanged = false;
     for (final info in updates) {
+      logger.finest('[audioElementLogs] _onParticipantUpdateEvent about to update _sidIdentity with ${info.sid}');
+
       // The local participant is not ready yet, waiting for the
       // `RoomConnectedEvent` to create the local participant.
       if (_localParticipant == null) {
@@ -764,7 +785,7 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
     }
   }
 
-  void _onSignalSpeakersChangedEvent(List<lk_models.SpeakerInfo> speakers) {
+  Future<void> _onSignalSpeakersChangedEvent(List<lk_models.SpeakerInfo> speakers) async {
     final lastSpeakers = {
       for (final p in _activeSpeakers) p.sid: p,
     };
@@ -848,7 +869,7 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
     emitWhenConnected(ActiveSpeakersChangedEvent(speakers: activeSpeakers));
   }
 
-  void _onSignalConnectionQualityUpdateEvent(List<lk_rtc.ConnectionQualityInfo> updates) {
+  Future<void> _onSignalConnectionQualityUpdateEvent(List<lk_rtc.ConnectionQualityInfo> updates) async {
     for (final entry in updates) {
       Participant? participant;
       if (entry.participantSid == localParticipant?.sid) {
@@ -864,7 +885,7 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
     }
   }
 
-  void _onSignalStreamStateUpdateEvent(List<lk_rtc.StreamStateInfo> updates) async {
+  Future<void> _onSignalStreamStateUpdateEvent(List<lk_rtc.StreamStateInfo> updates) async {
     for (final update in updates) {
       // try to find RemoteParticipant
       final participant = _remoteParticipants.bySid[update.participantSid];
@@ -966,7 +987,7 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
       }
     }
 
-    engine.sendSyncState(
+    await engine.sendSyncState(
       subscription: lk_rtc.UpdateSubscription(
         participantTracks: [],
         trackSids: trackSids,
