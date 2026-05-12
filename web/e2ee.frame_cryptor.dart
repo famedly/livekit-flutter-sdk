@@ -533,7 +533,7 @@ class FrameCryptor {
         await decryptFrameInternal();
       } catch (e) {
         lastError = CryptorError.kInternalError;
-        logger.finer('decodeFunction: kInternalError catch $e');
+        logger.warning('decodeFunction: kInternalError catch $e');
         await ratchetKeyInternal();
       }
 
