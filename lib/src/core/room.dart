@@ -643,19 +643,12 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
         trackSid = streamId;
       }
 
-      RemoteParticipant? participant = _remoteParticipants.bySid[participantSid];
+      // When a track arrives before its participant's metadata is known,
+      // upstream's `_pendingTrackQueue` defers the track and `_flushPendingTracks`
+      // subscribes it as soon as the participant appears, so no manual retry loop
+      // is needed here. We keep the `[audioElementLogs]` diagnostics below.
+      final participant = _remoteParticipants.bySid[participantSid];
 
-      if (participant == null) {
-        logger.warning(
-            '[audioElementLogs] _setupEngineFailed could not find remoteParticipant, will try again, $participantSid');
-
-        for (var i = 0; i < 5; i++) {
-          if (participant != null) break;
-          logger.info('[audioElementLogs] _getRemoteParticipantBySid try: $i, sid: $participantSid');
-          await Future.delayed(Duration(seconds: 1));
-          participant = _remoteParticipants.bySid[participantSid];
-        }
-      }
       try {
         if (trackSid == null || trackSid.isEmpty) {
           throw TrackSubscriptionExceptionEvent(
