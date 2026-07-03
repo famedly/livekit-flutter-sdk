@@ -29,6 +29,7 @@ import '../support/platform.dart';
 import '../track/local/local.dart';
 import '../track/local/video.dart';
 import '../track/options.dart';
+import '../track/video_track_view_registration.dart';
 import '../types/other.dart';
 
 enum VideoViewMirrorMode {
@@ -69,6 +70,17 @@ class VideoTrackRenderer extends StatefulWidget {
   /// wrap the video view in a Center widget (if [fit] is [VideoViewFit.contain])
   final bool autoCenter;
 
+  /// Controls how this view's logical size is converted to the physical-pixel
+  /// dimensions requested from the server when adaptive stream is enabled.
+  /// Defaults to [AdaptiveStreamPixelDensity.auto] (the view's own device pixel
+  /// ratio), avoiding an under-sized layer on retina / high-density displays.
+  final AdaptiveStreamPixelDensity adaptiveStreamPixelDensity;
+
+  /// Placeholder builder to display while the track is loading.
+  ///
+  /// On iOS, this has no effect when [renderMode] is [VideoRenderMode.platformView].
+  final WidgetBuilder? placeholderBuilder;
+
   const VideoTrackRenderer(
     this.track, {
     this.fit = VideoViewFit.contain,
@@ -77,6 +89,8 @@ class VideoTrackRenderer extends StatefulWidget {
     this.autoDisposeRenderer = true,
     this.cachedRenderer,
     this.autoCenter = true,
+    this.adaptiveStreamPixelDensity = AdaptiveStreamPixelDensity.auto,
+    this.placeholderBuilder,
     Key? key,
   }) : super(key: key);
 
@@ -91,7 +105,7 @@ class _VideoTrackRendererState extends State<VideoTrackRenderer> {
   double? _aspectRatio;
   EventsListener<TrackEvent>? _listener;
   // Used to compute visibility information
-  late GlobalKey _internalKey;
+  late VideoTrackViewRegistration _viewRegistration;
 
   Future<rtc.VideoRenderer> _initializeRenderer() async {
     if (lkPlatformIs(PlatformType.iOS) && widget.renderMode == VideoRenderMode.platformView) {
@@ -142,7 +156,7 @@ class _VideoTrackRendererState extends State<VideoTrackRenderer> {
     if (widget.cachedRenderer != null) {
       _renderer = widget.cachedRenderer;
     }
-    _internalKey = widget.track.addViewKey();
+    _viewRegistration = widget.track.addViewRegistration(pixelDensity: widget.adaptiveStreamPixelDensity);
     if (kIsWeb) {
       unawaited(() async {
         await _initializeRenderer();
@@ -154,7 +168,7 @@ class _VideoTrackRendererState extends State<VideoTrackRenderer> {
 
   @override
   void dispose() {
-    widget.track.removeViewKey(_internalKey);
+    widget.track.removeViewRegistration(_viewRegistration);
     unawaited(_listener?.dispose());
     if (widget.autoDisposeRenderer) {
       disposeRenderer();
@@ -188,11 +202,13 @@ class _VideoTrackRendererState extends State<VideoTrackRenderer> {
   void didUpdateWidget(covariant VideoTrackRenderer oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (widget.track != oldWidget.track) {
-      oldWidget.track.removeViewKey(_internalKey);
-      _internalKey = widget.track.addViewKey();
+      oldWidget.track.removeViewRegistration(_viewRegistration);
+      _viewRegistration = widget.track.addViewRegistration(pixelDensity: widget.adaptiveStreamPixelDensity);
       unawaited(() async {
         await _attach();
       }());
+    } else if (widget.adaptiveStreamPixelDensity != oldWidget.adaptiveStreamPixelDensity) {
+      _viewRegistration.pixelDensity = widget.adaptiveStreamPixelDensity;
     }
 
     if ([BrowserType.safari, BrowserType.firefox].contains(lkBrowser()) && oldWidget.key != widget.key) {
@@ -201,19 +217,20 @@ class _VideoTrackRendererState extends State<VideoTrackRenderer> {
   }
 
   Widget _videoViewForWeb() => !_rendererReadyForWeb
-      ? Container()
+      ? (widget.placeholderBuilder?.call(context) ?? const SizedBox.shrink())
       : Builder(
-          key: _internalKey,
+          key: _viewRegistration.key,
           builder: (ctx) {
             // let it render before notifying build
             WidgetsBindingCompatible.instance?.addPostFrameCallback((timeStamp) {
-              widget.track.onVideoViewBuild?.call(_internalKey);
+              widget.track.onVideoViewBuild?.call();
             });
             return rtc.RTCVideoView(
               _renderer! as rtc.RTCVideoRenderer,
               mirror: _shouldMirror(),
               filterQuality: FilterQuality.medium,
               objectFit: widget.fit.toRTCType(),
+              placeholderBuilder: widget.placeholderBuilder,
             );
           },
         );
@@ -235,6 +252,7 @@ class _VideoTrackRendererState extends State<VideoTrackRenderer> {
       mirror: _shouldMirror(),
       filterQuality: FilterQuality.medium,
       objectFit: widget.fit.toRTCType(),
+      placeholderBuilder: widget.placeholderBuilder,
     );
   }
 
@@ -244,11 +262,11 @@ class _VideoTrackRendererState extends State<VideoTrackRenderer> {
         if ((snapshot.hasData && _renderer != null) ||
             (lkPlatformIs(PlatformType.iOS) && widget.renderMode == VideoRenderMode.platformView)) {
           return Builder(
-            key: _internalKey,
+            key: _viewRegistration.key,
             builder: (ctx) {
               // let it render before notifying build
               WidgetsBindingCompatible.instance?.addPostFrameCallback((timeStamp) {
-                widget.track.onVideoViewBuild?.call(_internalKey);
+                widget.track.onVideoViewBuild?.call();
               });
 
               if (!lkPlatformIsMobile() || widget.track is! LocalVideoTrack) {
@@ -271,7 +289,7 @@ class _VideoTrackRendererState extends State<VideoTrackRenderer> {
             },
           );
         }
-        return Container();
+        return widget.placeholderBuilder?.call(context) ?? const SizedBox.shrink();
       });
 
   // FutureBuilder will cause flickering for flutter web. so using

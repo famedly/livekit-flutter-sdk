@@ -19,6 +19,7 @@ import 'package:collection/collection.dart';
 import 'package:http/http.dart' as http;
 import 'package:meta/meta.dart';
 
+import '../audio/audio_manager.dart';
 import '../core/signal_client.dart';
 import '../data_stream/errors.dart';
 import '../data_stream/stream_reader.dart';
@@ -38,6 +39,8 @@ import '../participant/remote.dart';
 import '../preconnect/pre_connect_audio_buffer.dart';
 import '../proto/livekit_models.pb.dart' as lk_models;
 import '../proto/livekit_rtc.pb.dart' as lk_rtc;
+import '../rpc/rpc_client_manager.dart';
+import '../rpc/rpc_server_manager.dart';
 import '../support/disposable.dart';
 import '../support/platform.dart';
 import '../support/region_url_provider.dart';
@@ -103,6 +106,9 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
   bool _isRecording = false;
   bool _audioEnabled = true;
 
+  // Whether the one-time RoomOptions speaker preference bridge has run.
+  bool _legacySpeakerBridged = false;
+
   lk_models.Room? _roomInfo;
 
   /// a list of participants that are actively speaking, including local participant.
@@ -122,8 +128,9 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
   // Agents
   final Map<String, DateTime> _transcriptionReceivedTimes = {};
 
-  // RPC Handlers
-  final Map<String, RpcRequestHandler> _rpcHandlers = {};
+  // RPC managers (caller and handler roles)
+  late final RpcClientManager _rpcClientManager;
+  late final RpcServerManager _rpcServerManager;
 
   final Map<String, DataStreamController<lk_models.DataStream_Chunk>> _byteStreamControllers = {};
 
@@ -139,12 +146,19 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
   // Pending subscriber tracks keyed by participantSid, for tracks arriving before metadata or before the room connected.
   late final PendingTrackQueue _pendingTrackQueue;
 
-  // for testing
+  // for testing — pass-through to the server manager's handler map.
   @internal
-  Map<String, RpcRequestHandler> get rpcHandlers => _rpcHandlers;
+  Map<String, RpcRequestHandler> get rpcHandlers => Map.unmodifiable(_rpcServerManager.handlers);
 
+  // Internal RPC v2 reserved topics are also stored in `_textStreamHandlers` so
+  // they ride the same dispatch path, but exposing them via the public-facing
+  // getter would surprise SDK consumers — filter them out here.
   @internal
-  Map<String, TextStreamHandler> get textStreamHandlers => _textStreamHandlers;
+  Map<String, TextStreamHandler> get textStreamHandlers => Map.fromEntries(
+        _textStreamHandlers.entries.where(
+          (e) => e.key != kRpcRequestTopic && e.key != kRpcResponseTopic,
+        ),
+      );
 
   @internal
   Map<String, ByteStreamHandler> get byteStreamHandlers => _byteStreamHandlers;
@@ -165,6 +179,9 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
 
     _signalListener = this.engine.signalClient.createListener();
     _setUpSignalListeners();
+
+    _rpcClientManager = RpcClientManager(this);
+    _rpcServerManager = RpcServerManager(this);
 
     _pendingTrackQueue = PendingTrackQueue(
       ttl: this.engine.connectOptions.timeouts.subscribe,
@@ -188,6 +205,8 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
     onDispose(() async {
       // clean up routine
       await _cleanUp();
+      // reject any in-flight RPC calls
+      _rpcClientManager.dispose();
       // dispose preConnectAudioBuffer
       await preConnectAudioBuffer.dispose();
       // dispose events
@@ -288,9 +307,20 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
       }));
     }
 
+    // Bridge a legacy RoomOptions speaker preference into the process-wide
+    // AudioManager once, on the first connect. Skipping it on a later manual
+    // connect of the same Room keeps a runtime speaker change from being
+    // reverted. New code should call setSpeakerOutputPreferred directly.
+    final legacySpeakerOn = roomOptions.defaultAudioOutputOptions.speakerOn;
+    if (legacySpeakerOn != null && !_legacySpeakerBridged && lkPlatformIsMobile()) {
+      _legacySpeakerBridged = true;
+      await AudioManager.instance.setSpeakerOutputPreferred(legacySpeakerOn);
+    }
+
     // configure audio for native platform
     await NativeAudioManagement.start();
 
+    var didConnect = false;
     try {
       await engine.connect(
         _regionUrl ?? url,
@@ -300,6 +330,7 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
         fastConnectOptions: fastConnectOptions,
         regionUrlProvider: _regionUrlProvider,
       );
+      didConnect = true;
     } catch (e) {
       logger.warning('could not connect to $url $e');
       if (_regionUrlProvider != null &&
@@ -322,11 +353,16 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
             fastConnectOptions: fastConnectOptions,
             regionUrlProvider: _regionUrlProvider,
           );
+          didConnect = true;
         } else {
           rethrow;
         }
       } else {
         rethrow;
+      }
+    } finally {
+      if (!didConnect) {
+        await NativeAudioManagement.stop();
       }
     }
   }
@@ -516,6 +552,7 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
       _remoteParticipants.clear();
       _activeSpeakers.clear();
       for (final participant in participants) {
+        _rpcClientManager.onParticipantDisconnected(participant.identity);
         events.emit(ParticipantDisconnectedEvent(participant: participant));
         await participant.removeAllPublishedTracks(notify: false);
         await participant.dispose();
@@ -962,6 +999,8 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
     final participant = _remoteParticipants.removeByIdentity(identity);
     if (participant == null) return false;
 
+    _rpcClientManager.onParticipantDisconnected(identity);
+
     await validateParticipantHasNoActiveDataStreams(identity);
 
     await participant.removeAllPublishedTracks(notify: true);
@@ -1137,7 +1176,8 @@ extension RoomHardwareManagementMethods on Room {
       roomOptions.defaultCameraCaptureOptions.deviceId ?? Hardware.instance.selectedVideoInput?.deviceId;
 
   /// Get mobile device's speaker status.
-  bool? get speakerOn => roomOptions.defaultAudioOutputOptions.speakerOn;
+  @Deprecated('Use AudioManager.instance.isSpeakerOutputPreferred instead')
+  bool? get speakerOn => AudioManager.instance.isSpeakerOutputPreferred;
 
   /// Set audio output device.
   Future<void> setAudioOutputDevice(MediaDevice device) async {
@@ -1202,27 +1242,10 @@ extension RoomHardwareManagementMethods on Room {
   /// [speakerOn] set speakerphone on or off, by default wired/bluetooth headsets will still
   /// be prioritized even if set to true.
   /// [forceSpeakerOutput] if true, will force speaker output even if headphones
-  /// or bluetooth is connected, only supported on iOS for now
-  Future<void> setSpeakerOn(bool speakerOn, {bool forceSpeakerOutput = false}) async {
-    if (lkPlatformIsMobile()) {
-      await Hardware.instance.setSpeakerphoneOn(speakerOn, forceSpeakerOutput: forceSpeakerOutput);
-      engine.roomOptions = engine.roomOptions.copyWith(
-        defaultAudioOutputOptions: roomOptions.defaultAudioOutputOptions.copyWith(
-          speakerOn: speakerOn,
-        ),
-      );
-    }
-  }
-
-  /// Apply audio output device settings.
-  @internal
-  Future<void> applyAudioSpeakerSettings() async {
-    if (roomOptions.defaultAudioOutputOptions.speakerOn != null) {
-      if (lkPlatformIsMobile()) {
-        await Hardware.instance.setSpeakerphoneOn(roomOptions.defaultAudioOutputOptions.speakerOn!);
-      }
-    }
-  }
+  /// or bluetooth is connected.
+  @Deprecated('Use AudioManager.instance.setSpeakerOutputPreferred instead')
+  Future<void> setSpeakerOn(bool speakerOn, {bool forceSpeakerOutput = false}) =>
+      AudioManager.instance.setSpeakerOutputPreferred(speakerOn, force: forceSpeakerOutput);
 
   Future<void> startAudio() async {
     try {
@@ -1261,11 +1284,11 @@ extension RoomHardwareManagementMethods on Room {
 
 extension RoomRPCMethods on Room {
   void _setupRpcListeners() {
-    // listen for incoming requests
+    // listen for incoming v1 packet-based requests/acks/responses
     _engineListener
       ..on<EngineRPCRequestReceivedEvent>((event) async {
         final request = event.request;
-        await _localParticipant?.handleIncomingRpcRequest(
+        await _rpcServerManager.handleIncomingV1Request(
           event.identity,
           request.id,
           request.method,
@@ -1275,7 +1298,7 @@ extension RoomRPCMethods on Room {
         );
       })
       ..on<EngineRPCAckReceivedEvent>((event) {
-        _localParticipant?.handleIncomingRpcAck(event.requestId);
+        _rpcClientManager.handleIncomingRpcAck(event.requestId);
       })
       ..on<EngineRPCResponseReceivedEvent>((event) {
         String? payload;
@@ -1286,8 +1309,13 @@ extension RoomRPCMethods on Room {
         } else if (event.error != null) {
           error = RpcError.fromProto(event.error!);
         }
-        _localParticipant?.handleIncomingRpcResponse(event.requestId, payload, error);
+        _rpcClientManager.handleIncomingRpcResponse(event.requestId, payload, error);
       });
+
+    // Register v2 data-stream-based request/response handlers. These topics
+    // are reserved by the SDK, so bypass the public registration guard.
+    _textStreamHandlers[kRpcRequestTopic] = _rpcServerManager.handleIncomingV2RequestStream;
+    _textStreamHandlers[kRpcResponseTopic] = _rpcClientManager.handleIncomingV2ResponseStream;
   }
 
   /// Register a handler for incoming RPC requests.
@@ -1296,18 +1324,27 @@ extension RoomRPCMethods on Room {
   /// The handler should return a string payload to send back to the caller.
   /// If the handler returns null, an error will be sent back to the caller.
   void registerRpcMethod(String method, RpcRequestHandler handler) {
-    if (rpcHandlers.containsKey(method)) {
-      throw Exception('Method $method already registered');
-    }
-    rpcHandlers[method] = handler;
+    _rpcServerManager.registerMethod(method, handler);
   }
 
   /// Unregister a handler for incoming RPC requests.
   /// @param method, the method name to unregister.
   void unregisterRpcMethod(String method) {
-    rpcHandlers.remove(method);
+    _rpcServerManager.unregisterMethod(method);
   }
 }
+
+extension RPCMethods on LocalParticipant {
+  /// Initiate an RPC call to a remote participant.
+  /// @param [params] - RPC call parameters.
+  /// @returns A future that resolves with the response payload or rejects with [RpcError].
+  /// @throws [RpcError] on failure. Details in `message`.
+  Future<String> performRpc(PerformRpcParams params) {
+    return room._rpcClientManager.performRpc(params);
+  }
+}
+
+const _reservedRpcTopicPrefix = 'lk.rpc';
 
 extension DataStreamRoomMethods on Room {
   void _setupDataStreamListeners() {
@@ -1324,6 +1361,7 @@ extension DataStreamRoomMethods on Room {
   }
 
   void registerTextStreamHandler(String topic, TextStreamHandler callback) {
+    _ensureNotReservedRpcTopic(topic);
     if (_textStreamHandlers.containsKey(topic)) {
       throw DataStreamError(
         message: 'A text stream handler for topic "${topic}" has already been set.',
@@ -1334,10 +1372,12 @@ extension DataStreamRoomMethods on Room {
   }
 
   void unregisterTextStreamHandler(String topic) {
+    if (_isReservedRpcTopic(topic)) return;
     _textStreamHandlers.remove(topic);
   }
 
   void registerByteStreamHandler(String topic, ByteStreamHandler callback) {
+    _ensureNotReservedRpcTopic(topic);
     if (_byteStreamHandlers.containsKey(topic)) {
       throw DataStreamError(
         message: 'A byte stream handler for topic "${topic}" has already been set.',
@@ -1348,8 +1388,20 @@ extension DataStreamRoomMethods on Room {
   }
 
   void unregisterByteStreamHandler(String topic) {
+    if (_isReservedRpcTopic(topic)) return;
     _byteStreamHandlers.remove(topic);
   }
+
+  void _ensureNotReservedRpcTopic(String topic) {
+    if (_isReservedRpcTopic(topic)) {
+      throw DataStreamError(
+        message: 'The stream topic prefix "$_reservedRpcTopicPrefix" is reserved for internal SDK use.',
+        reason: DataStreamErrorReason.HandlerAlreadyRegistered,
+      );
+    }
+  }
+
+  bool _isReservedRpcTopic(String topic) => topic.startsWith(_reservedRpcTopicPrefix);
 
   @internal
   Future<void> handleStreamHeader(
