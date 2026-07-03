@@ -48,29 +48,12 @@ class E2EEManager {
       _listener = _room!.createListener();
       _listener!
         ..on<LocalTrackPublishedEvent>((event) async {
-          if (event.publication.encryptionType == EncryptionType.kNone ||
-              isAV1Codec(event.publication.track?.codec ?? '')) {
-            // no need to setup frame cryptor
-            return;
+          try {
+            await _setupFrameCryptorForLocalTrack(event);
+          } catch (error) {
+            logger.warning(
+                'E2EEManager: failed to set up frame cryptor for local track ${event.publication.sid}: $error');
           }
-          final frameCryptor = await _addRtpSender(
-              sender: event.publication.track!.sender!,
-              identity: event.participant.identity,
-              sid: event.publication.sid);
-          if (kIsWeb && event.publication.track!.codec != null) {
-            await frameCryptor.updateCodec(event.publication.track!.codec!);
-          }
-          frameCryptor.onFrameCryptorStateChanged = (trackId, state) {
-            if (kDebugMode) {
-              print('Sender::onFrameCryptorStateChanged: $state, trackId:  $trackId');
-            }
-            final participant = event.participant;
-            [event.participant.events, participant.room.events].emit(TrackE2EEStateEvent(
-              participant: participant,
-              publication: event.publication,
-              state: _e2eeStateFromFrameCryptoState(state),
-            ));
-          };
         })
         ..on<LocalTrackUnpublishedEvent>((event) async {
           for (var key in _frameCryptors.keys.toList()) {
@@ -82,30 +65,12 @@ class E2EEManager {
           }
         })
         ..on<TrackSubscribedEvent>((event) async {
-          final codec = event.publication.mimeType.split('/')[1];
-          if (event.publication.encryptionType == EncryptionType.kNone || isAV1Codec(codec)) {
-            // no need to setup frame cryptor
-            return;
+          try {
+            await _setupFrameCryptorForRemoteTrack(event);
+          } catch (error) {
+            logger.warning(
+                'E2EEManager: failed to set up frame cryptor for remote track ${event.publication.sid}: $error');
           }
-          final frameCryptor = await _addRtpReceiver(
-            receiver: event.track.receiver!,
-            identity: event.participant.identity,
-            sid: event.publication.sid,
-          );
-          if (kIsWeb) {
-            await frameCryptor.updateCodec(codec.toLowerCase());
-          }
-          frameCryptor.onFrameCryptorStateChanged = (trackId, state) {
-            if (kDebugMode) {
-              print('Receiver::onFrameCryptorStateChanged: $state, trackId: $trackId');
-            }
-            final participant = event.participant;
-            [event.participant.events, participant.room.events].emit(TrackE2EEStateEvent(
-              participant: participant,
-              publication: event.publication,
-              state: _e2eeStateFromFrameCryptoState(state),
-            ));
-          };
         })
         ..on<TrackUnsubscribedEvent>((event) async {
           for (var key in _frameCryptors.keys.toList()) {
@@ -118,6 +83,95 @@ class E2EEManager {
         });
       _dataPacketCryptor ??= await dataPacketCryptorFactory.createDataPacketCryptor(
           algorithm: _algorithm, keyProvider: _keyProvider.keyProvider);
+    }
+  }
+
+  /// Extracts the codec part of a mime type (e.g. `vp8` for `video/VP8`).
+  /// Returns an empty string when the mime type is absent or malformed.
+  static String _codecFromMimeType(String mimeType) {
+    final parts = mimeType.split('/');
+    return parts.length == 2 ? parts[1].toLowerCase() : '';
+  }
+
+  Future<void> _setupFrameCryptorForLocalTrack(LocalTrackPublishedEvent event) async {
+    if (event.publication.encryptionType == EncryptionType.kNone || isAV1Codec(event.publication.track?.codec ?? '')) {
+      // no need to setup frame cryptor
+      return;
+    }
+    final frameCryptor = await _addRtpSender(
+        sender: event.publication.track!.sender!, identity: event.participant.identity, sid: event.publication.sid);
+    // Attach the state callback before any await that may throw so E2EE state
+    // changes are always surfaced.
+    frameCryptor.onFrameCryptorStateChanged = (trackId, state) {
+      if (kDebugMode) {
+        print('Sender::onFrameCryptorStateChanged: $state, trackId:  $trackId');
+      }
+      final participant = event.participant;
+      [event.participant.events, participant.room.events].emit(TrackE2EEStateEvent(
+        participant: participant,
+        publication: event.publication,
+        state: _e2eeStateFromFrameCryptoState(state),
+      ));
+    };
+    if (kIsWeb && event.publication.track!.codec != null) {
+      await frameCryptor.updateCodec(event.publication.track!.codec!);
+    }
+  }
+
+  Future<void> _setupFrameCryptorForRemoteTrack(TrackSubscribedEvent event) async {
+    final publication = event.publication;
+    final participant = event.participant;
+    final listenerAtStart = _listener;
+
+    // A track can be subscribed before its TrackInfo metadata (mimeType /
+    // encryption) has been applied to the publication. Deciding on that
+    // incomplete metadata used to either throw (`mimeType.split('/')[1]` on an
+    // empty mime type) or wrongly skip the frame cryptor, so the track stayed
+    // encrypted forever (black video / silent audio). Wait for the metadata to
+    // arrive before deciding.
+    final timeout = participant.room.connectOptions.timeouts.publish;
+    final deadline = DateTime.now().add(timeout);
+    var codec = _codecFromMimeType(publication.mimeType);
+    while ((codec.isEmpty || publication.encryptionType == EncryptionType.kNone) && DateTime.now().isBefore(deadline)) {
+      await Future.delayed(const Duration(milliseconds: 200));
+      // Manager was cleaned up, or the track was unsubscribed / replaced while
+      // waiting; a newer subscription will run its own setup.
+      if (!identical(_listener, listenerAtStart) || !identical(publication.track, event.track)) {
+        return;
+      }
+      codec = _codecFromMimeType(publication.mimeType);
+    }
+
+    if (publication.encryptionType == EncryptionType.kNone || isAV1Codec(codec)) {
+      // no need to setup frame cryptor
+      logger.info('E2EEManager: not setting up frame cryptor for ${publication.sid}'
+          ' (mimeType: "${publication.mimeType}", encryption: ${publication.encryptionType})');
+      return;
+    }
+    if (codec.isEmpty) {
+      logger.warning('E2EEManager: no mimeType for encrypted track ${publication.sid} after $timeout,'
+          ' setting up frame cryptor without codec');
+    }
+
+    final frameCryptor = await _addRtpReceiver(
+      receiver: event.track.receiver!,
+      identity: participant.identity,
+      sid: publication.sid,
+    );
+    // Attach the state callback before any await that may throw so E2EE state
+    // changes are always surfaced.
+    frameCryptor.onFrameCryptorStateChanged = (trackId, state) {
+      if (kDebugMode) {
+        print('Receiver::onFrameCryptorStateChanged: $state, trackId: $trackId');
+      }
+      [participant.events, participant.room.events].emit(TrackE2EEStateEvent(
+        participant: participant,
+        publication: publication,
+        state: _e2eeStateFromFrameCryptoState(state),
+      ));
+    };
+    if (kIsWeb && codec.isNotEmpty) {
+      await frameCryptor.updateCodec(codec);
     }
   }
 
