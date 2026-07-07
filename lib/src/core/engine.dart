@@ -1096,7 +1096,9 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
         fullReconnectOnNext = true;
       }
 
-      if (e is UnexpectedConnectionState) {
+      if (e is UnexpectedConnectionState || e is CertificatePinningException) {
+        // certificate pinning failures are deterministic, retrying would only
+        // repeat TLS handshakes against an untrusted endpoint
         recoverable = false;
       }
 
@@ -1104,10 +1106,15 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
         unawaited(handleReconnect(ClientDisconnectReason.reconnectRetry));
       } else {
         logger.fine('attemptReconnect: disconnecting...');
-        events.emit(EngineDisconnectedEvent(
-          reason: DisconnectReason.disconnected,
-        ));
+        // clean up before emitting, room's EngineDisconnectedEvent handler
+        // drops the event while fullReconnectOnNext is still true and
+        // cleanUp() is what resets it
         await cleanUp();
+        events.emit(EngineDisconnectedEvent(
+          reason: e is CertificatePinningException
+              ? DisconnectReason.signalingConnectionFailure
+              : DisconnectReason.disconnected,
+        ));
       }
     } finally {
       _attemptingReconnect = false;
@@ -1216,6 +1223,15 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
       _regionUrlProvider?.resetAttempts();
       events.emit(const EngineRestartedEvent());
     } catch (error) {
+      // Certificate pinning failures skip region failover. The pin set is
+      // client-wide config, so every region would be validated against the
+      // same pins and each attempt is another TLS handshake with an endpoint
+      // that already failed validation. Initial connect behaves the same way,
+      // room.connect only fails over on WebSocketException/ConnectException.
+      if (error is CertificatePinningException) {
+        _regionUrlProvider?.resetAttempts();
+        rethrow;
+      }
       final nextRegionUrl = await _regionUrlProvider?.getNextBestRegionUrl();
       if (nextRegionUrl != null) {
         await restartConnection(regionUrl: nextRegionUrl);
@@ -1352,9 +1368,16 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
         await handleReconnect(ClientDisconnectReason.signal,
             reconnectReason: lk_models.ReconnectReason.RR_SIGNAL_DISCONNECTED);
       } else if (event.reason == DisconnectReason.signalingConnectionFailure) {
-        events.emit(EngineDisconnectedEvent(
-          reason: event.reason,
-        ));
+        // while reconnecting, attemptReconnect owns disconnect handling and
+        // emits EngineDisconnectedEvent itself, relaying here as well would
+        // race it with a duplicate event. _attemptingReconnect covers the
+        // window where cleanUp() has already reset _isReconnecting but
+        // attemptReconnect has not finished its error handling yet
+        if (!_isReconnecting && !_attemptingReconnect) {
+          events.emit(EngineDisconnectedEvent(
+            reason: event.reason,
+          ));
+        }
       }
     })
     ..on<SignalOfferEvent>((event) async {
