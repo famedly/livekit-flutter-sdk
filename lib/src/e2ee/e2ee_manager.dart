@@ -132,7 +132,7 @@ class E2EEManager {
     final timeout = participant.room.connectOptions.timeouts.publish;
     final deadline = DateTime.now().add(timeout);
     var codec = _codecFromMimeType(publication.mimeType);
-    while ((codec.isEmpty || publication.encryptionType == EncryptionType.kNone) && DateTime.now().isBefore(deadline)) {
+    while ((codec.isEmpty || publication.latestInfo == null) && DateTime.now().isBefore(deadline)) {
       await Future.delayed(const Duration(milliseconds: 200));
       // Manager was cleaned up, or the track was unsubscribed / replaced while
       // waiting; a newer subscription will run its own setup.
