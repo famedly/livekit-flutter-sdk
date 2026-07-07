@@ -663,19 +663,7 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
         trackSid = streamId;
       }
 
-      RemoteParticipant? participant = _remoteParticipants.bySid[participantSid];
-
-      if (participant == null) {
-        logger.warning(
-            '[audioElementLogs] _setupEngineFailed could not find remoteParticipant, will try again, $participantSid');
-
-        for (var i = 0; i < 5; i++) {
-          if (participant != null) break;
-          logger.info('[audioElementLogs] _getRemoteParticipantBySid try: $i, sid: $participantSid');
-          await Future.delayed(Duration(seconds: 1));
-          participant = _remoteParticipants.bySid[participantSid];
-        }
-      }
+      final participant = _remoteParticipants.bySid[participantSid];
       try {
         if (trackSid == null || trackSid.isEmpty) {
           throw TrackSubscriptionExceptionEvent(
@@ -686,8 +674,6 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
 
         final shouldDefer = connectionState != ConnectionState.connected || participant == null;
         if (shouldDefer) {
-          logger.warning(
-              '[audioElementLogs] _setupEngineFailed could not find remoteParticipant, will enqueue for later, $participantSid');
           _pendingTrackQueue.enqueue(
             track: event.track,
             stream: event.stream,
@@ -772,8 +758,6 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
     // trigger change notifier only if list of participants membership is changed
     var hasChanged = false;
     for (final info in updates) {
-      logger.finest('[audioElementLogs] _onParticipantUpdateEvent about to update _sidIdentity with ${info.sid}');
-
       // The local participant is not ready yet, waiting for the
       // `RoomConnectedEvent` to create the local participant.
       if (_localParticipant == null) {
@@ -826,7 +810,7 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
     }
   }
 
-  Future<void> _onSignalSpeakersChangedEvent(List<lk_models.SpeakerInfo> speakers) async {
+  void _onSignalSpeakersChangedEvent(List<lk_models.SpeakerInfo> speakers) {
     final lastSpeakers = {
       for (final p in _activeSpeakers) p.sid: p,
     };
@@ -910,7 +894,7 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
     emitWhenConnected(ActiveSpeakersChangedEvent(speakers: activeSpeakers));
   }
 
-  Future<void> _onSignalConnectionQualityUpdateEvent(List<lk_rtc.ConnectionQualityInfo> updates) async {
+  void _onSignalConnectionQualityUpdateEvent(List<lk_rtc.ConnectionQualityInfo> updates) {
     for (final entry in updates) {
       Participant? participant;
       if (entry.participantSid == localParticipant?.sid) {
@@ -926,7 +910,7 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
     }
   }
 
-  Future<void> _onSignalStreamStateUpdateEvent(List<lk_rtc.StreamStateInfo> updates) async {
+  void _onSignalStreamStateUpdateEvent(List<lk_rtc.StreamStateInfo> updates) async {
     for (final update in updates) {
       // try to find RemoteParticipant
       final participant = _remoteParticipants.bySid[update.participantSid];
