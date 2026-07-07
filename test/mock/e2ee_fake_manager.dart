@@ -91,6 +91,12 @@ class TestE2EEManager implements E2EEManager {
   bool _enabled = true;
 
   @override
+  rtc.FrameCryptorFactory cryptorFactory = rtc.frameCryptorFactory;
+
+  @override
+  rtc.DataPacketCryptorFactory dataCryptorFactory = rtc.dataPacketCryptorFactory;
+
+  @override
   BaseKeyProvider get keyProvider => _keyProvider;
 
   @override

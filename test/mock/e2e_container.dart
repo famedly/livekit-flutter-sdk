@@ -33,15 +33,17 @@ class E2EContainer {
   late Room room;
   late Engine engine;
 
+  final ConnectOptions connectOptions;
+
   /// All `DataPacket`s sent by the SDK over the (publisher) reliable data channel
   /// since [connectRoom] returned. Populated only when [captureOutbound] is true.
   final List<lk_models.DataPacket> capturedDataPackets = [];
 
-  E2EContainer() {
+  E2EContainer({this.connectOptions = const ConnectOptions()}) {
     wsConnector = MockWebSocketConnector();
     client = SignalClient(wsConnector.connect);
     engine = Engine(
-      connectOptions: const ConnectOptions(),
+      connectOptions: connectOptions,
       roomOptions: const RoomOptions(),
       signalClient: client,
       peerConnectionCreate: MockPeerConnection.create,
@@ -59,7 +61,7 @@ class E2EContainer {
   /// When [captureOutbound] is true, all DataPackets sent over the reliable
   /// data channel are recorded in [capturedDataPackets].
   Future<void> connectRoom({int? localClientProtocol, bool captureOutbound = false}) async {
-    final connectFuture = room.connect(exampleUri, token);
+    final connectFuture = room.connect(exampleUri, token, connectOptions: connectOptions);
     Future.delayed(const Duration(milliseconds: 1), () {
       final resp = _buildJoinResponse(localClientProtocol);
       wsConnector.onData(resp.writeToBuffer());

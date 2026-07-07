@@ -17,6 +17,7 @@ import 'dart:typed_data' show Uint8List;
 import 'package:flutter/foundation.dart' show kDebugMode, kIsWeb;
 
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:meta/meta.dart';
 
 import '../core/room.dart';
 import '../events.dart';
@@ -37,6 +38,15 @@ class E2EEManager {
   bool _enabled = true;
   bool _encryptionEnabled = false;
   EventsListener<RoomEvent>? _listener;
+
+  /// The factory used to create [FrameCryptor]s. Overridable for testing.
+  @visibleForTesting
+  FrameCryptorFactory cryptorFactory = frameCryptorFactory;
+
+  /// The factory used to create the [DataPacketCryptor]. Overridable for testing.
+  @visibleForTesting
+  DataPacketCryptorFactory dataCryptorFactory = dataPacketCryptorFactory;
+
   E2EEManager(this._keyProvider, {bool dcEncryptionEnabled = false}) {
     _encryptionEnabled = dcEncryptionEnabled;
   }
@@ -81,7 +91,7 @@ class E2EEManager {
             }
           }
         });
-      _dataPacketCryptor ??= await dataPacketCryptorFactory.createDataPacketCryptor(
+      _dataPacketCryptor ??= await dataCryptorFactory.createDataPacketCryptor(
           algorithm: _algorithm, keyProvider: _keyProvider.keyProvider);
     }
   }
@@ -200,7 +210,7 @@ class E2EEManager {
 
   Future<FrameCryptor> _addRtpSender(
       {required RTCRtpSender sender, required String identity, required String sid}) async {
-    final frameCryptor = await frameCryptorFactory.createFrameCryptorForRtpSender(
+    final frameCryptor = await cryptorFactory.createFrameCryptorForRtpSender(
         participantId: identity, sender: sender, algorithm: _algorithm, keyProvider: _keyProvider.keyProvider);
     _frameCryptors[{identity: sid}] = frameCryptor;
     await frameCryptor.setEnabled(_enabled);
@@ -211,7 +221,7 @@ class E2EEManager {
 
   Future<FrameCryptor> _addRtpReceiver(
       {required RTCRtpReceiver receiver, required String identity, required String sid}) async {
-    final frameCryptor = await frameCryptorFactory.createFrameCryptorForRtpReceiver(
+    final frameCryptor = await cryptorFactory.createFrameCryptorForRtpReceiver(
         participantId: identity, receiver: receiver, algorithm: _algorithm, keyProvider: _keyProvider.keyProvider);
     _frameCryptors[{identity: sid}] = frameCryptor;
     await frameCryptor.setEnabled(_enabled);
