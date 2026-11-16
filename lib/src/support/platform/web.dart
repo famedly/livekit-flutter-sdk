@@ -17,8 +17,10 @@ import 'dart:js_interop_unsafe';
 
 import 'package:flutter/foundation.dart' show defaultTargetPlatform, TargetPlatform;
 
+import 'package:logging/logging.dart' show Level;
 import 'package:web/web.dart' as web;
 
+import '../../logger.dart';
 import '../platform.dart';
 
 PlatformType lkPlatformImplementation() => PlatformType.web;
@@ -32,6 +34,26 @@ bool lkE2EESupportedImplementation() {
 }
 
 bool lkPlatformIsTestImplementation() => false;
+
+bool _forwardingE2EEWorkerLogs = false;
+
+void lkForwardE2EEWorkerLogsImplementation() {
+  if (_forwardingE2EEWorkerLogs) return;
+  _forwardingE2EEWorkerLogs = true;
+  // The check flutter_webrtc uses to pick the API.
+  final scriptTransform = web.window.hasProperty('RTCRtpScriptTransform'.toJS).toDart;
+  logger.info('E2EE frames go through ${scriptTransform ? 'RTCRtpScriptTransform' : 'createEncodedStreams'}');
+  // shortcut: every same-origin tab's worker posts here, so a second call tab's
+  // worker lines show up too. Tag them per worker if that ever confuses a report.
+  web.BroadcastChannel('livekit-e2ee-worker-log').onmessage = (web.MessageEvent event) {
+    final data = event.data.dartify() as Map;
+    final value = (data['level'] as num).toInt();
+    logger.log(
+      Level.LEVELS.firstWhere((level) => level.value == value, orElse: () => Level.INFO),
+      data['message'],
+    );
+  }.toJS;
+}
 
 bool isScriptTransformSupported() {
   return web.window.hasProperty('RTCRtpScriptTransform'.toJS).isDefinedAndNotNull;
