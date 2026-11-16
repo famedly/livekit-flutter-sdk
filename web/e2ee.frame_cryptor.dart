@@ -53,6 +53,7 @@ class FrameCryptor {
   late String kind;
   bool _enabled = false;
   bool _transformIsActive = false;
+  int _discardedFrames = 0;
   CryptorError lastError = CryptorError.kNew;
   int currentKeyIndex = 0;
   final web.DedicatedWorkerGlobalScope worker;
@@ -87,6 +88,7 @@ class FrameCryptor {
   }
 
   void setEnabled(bool enabled) {
+    _discardedFrames = 0;
     if (lastError != CryptorError.kOk) {
       logger.info('setEnabled[$enabled]: lastError != CryptorError.kOk, reset state to kNew');
       lastError = CryptorError.kNew;
@@ -406,7 +408,16 @@ class FrameCryptor {
         // skip for encryption for empty dtx frames
         srcFrame.buffer.isEmpty) {
       sifGuard.recordUserFrame();
-      if (keyOptions.discardFrameWhenCryptorNotReady) return;
+      if (keyOptions.discardFrameWhenCryptorNotReady) {
+        // Otherwise silent: no cryptor state is reported for these frames. A
+        // few before 'enable' arrives are normal, a run of them is not.
+        if (!enabled && ++_discardedFrames == 30) {
+          logger.warning(
+            'decodeFunction: discarded $_discardedFrames $kind frames of track $trackId from $participantIdentity, the cryptor is not enabled',
+          );
+        }
+        return;
+      }
       logger.fine('enqueuing empty dtx frame');
       controller.enqueue(frameObj);
       return;
