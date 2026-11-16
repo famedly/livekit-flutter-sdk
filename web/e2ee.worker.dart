@@ -21,6 +21,22 @@ var participantCryptors = <FrameCryptor>[];
 var participantDataCryptors = <E2EEDataPacketCryptor>[];
 var keyProviders = <String, KeyProvider>{};
 
+/// With RTCRtpScriptTransform the cryptor only exists once the rtctransform
+/// event arrives, which can come after 'enable', 'setKeyIndex' and
+/// 'updateCodec' for the same track. Those are kept here until then, or a
+/// receiver stays disabled and silently drops every frame.
+final pendingTrackUpdates = <String, List<void Function(FrameCryptor)>>{};
+
+void updateTrackCryptors(String trackId, void Function(FrameCryptor) update) {
+  final cryptors = participantCryptors.where((c) => c.trackId == trackId).toList();
+  if (cryptors.isEmpty) {
+    logger.info('no cryptor for trackId $trackId yet, applying the update once it is created');
+    (pendingTrackUpdates[trackId] ??= []).add(update);
+    return;
+  }
+  cryptors.forEach(update);
+}
+
 FrameCryptor getTrackCryptor(String participantIdentity, String trackId, KeyProvider keyProvider) {
   var cryptor = participantCryptors.firstWhereOrNull((c) => c.trackId == trackId);
   if (cryptor == null) {
@@ -34,6 +50,7 @@ FrameCryptor getTrackCryptor(String participantIdentity, String trackId, KeyProv
     );
     //setupCryptorErrorEvents(cryptor);
     participantCryptors.add(cryptor);
+    pendingTrackUpdates.remove(trackId)?.forEach((update) => update(cryptor!));
   } else if (participantIdentity != cryptor.participantIdentity) {
     // assign new participant id to track cryptor and pass in correct key handler
     cryptor.setParticipant(participantIdentity, keyProvider.getParticipantKeyHandler(participantIdentity));
@@ -174,11 +191,10 @@ void main() async {
           final enabled = msg['enabled'] as bool;
           final trackId = msg['trackId'] as String;
 
-          final cryptors = participantCryptors.where((c) => c.trackId == trackId).toList();
-          for (var cryptor in cryptors) {
+          updateTrackCryptors(trackId, (cryptor) {
             logger.config('Set enable $enabled for trackId ${cryptor.trackId}');
             cryptor.setEnabled(enabled);
-          }
+          });
           self.postMessage(
             {
               'type': 'cryptorEnabled',
@@ -350,11 +366,10 @@ void main() async {
           final keyIndex = msg['index'];
           final trackId = msg['trackId'] as String;
           logger.config('Setup key index for track $trackId');
-          final cryptors = participantCryptors.where((c) => c.trackId == trackId).toList();
-          for (var c in cryptors) {
+          updateTrackCryptors(trackId, (c) {
             logger.config('Set keyIndex for trackId ${c.trackId}');
             c.setKeyIndex(keyIndex);
-          }
+          });
 
           self.postMessage(
             {
@@ -443,8 +458,7 @@ void main() async {
           final codec = msg['codec'] as String;
           final trackId = msg['trackId'] as String;
           logger.config('Update codec for trackId $trackId, codec $codec');
-          final cryptor = participantCryptors.firstWhereOrNull((c) => c.trackId == trackId);
-          cryptor?.updateCodec(codec);
+          updateTrackCryptors(trackId, (cryptor) => cryptor.updateCodec(codec));
 
           self.postMessage(
             {
@@ -459,6 +473,7 @@ void main() async {
         {
           final trackId = msg['trackId'] as String;
           logger.config('Dispose for trackId $trackId');
+          pendingTrackUpdates.remove(trackId);
           final cryptor = participantCryptors.firstWhereOrNull((c) => c.trackId == trackId);
           if (cryptor != null) {
             cryptor.lastError = CryptorError.kDisposed;
