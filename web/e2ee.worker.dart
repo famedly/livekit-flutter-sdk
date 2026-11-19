@@ -37,10 +37,6 @@ void updateTrackCryptors(String trackId, void Function(FrameCryptor) update) {
   cryptors.forEach(update);
 }
 
-/// Read by the page, see lkForwardE2EEWorkerLogs, so the worker's own
-/// warnings reach the app's logs instead of only the browser console.
-final logChannel = web.BroadcastChannel('livekit-e2ee-worker-log');
-
 FrameCryptor getTrackCryptor(String participantIdentity, String trackId, KeyProvider keyProvider) {
   var cryptor = participantCryptors.firstWhereOrNull((c) => c.trackId == trackId);
   if (cryptor == null) {
@@ -99,8 +95,15 @@ void main() async {
     if (record.level >= Level.WARNING) {
       print('[${record.loggerName}] ${record.level.name}: ${record.message}');
     }
-    logChannel.postMessage(
-      {'level': record.level.value, 'message': '[${record.loggerName}] ${record.message}'}.jsify(),
+    // Read by the page, see lkForwardE2EEWorkerLogs, so the worker's own lines
+    // reach the app's logs instead of only the browser console.
+    self.postMessage(
+      {
+        'msgType': 'event',
+        'type': 'log',
+        'level': record.level.value,
+        'message': '[${record.loggerName}] ${record.message}',
+      }.jsify(),
     );
   });
 

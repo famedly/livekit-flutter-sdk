@@ -17,6 +17,8 @@ import 'dart:js_interop_unsafe';
 
 import 'package:flutter/foundation.dart' show defaultTargetPlatform, TargetPlatform;
 
+// ignore: implementation_imports
+import 'package:dart_webrtc/src/frame_cryptor_impl.dart' show FrameCryptorFactoryImpl;
 import 'package:logging/logging.dart' show Level;
 import 'package:web/web.dart' as web;
 
@@ -43,16 +45,20 @@ void lkForwardE2EEWorkerLogsImplementation() {
   // The check flutter_webrtc uses to pick the API.
   final scriptTransform = web.window.hasProperty('RTCRtpScriptTransform'.toJS).toDart;
   logger.info('E2EE frames go through ${scriptTransform ? 'RTCRtpScriptTransform' : 'createEncodedStreams'}');
-  // shortcut: every same-origin tab's worker posts here, so a second call tab's
-  // worker lines show up too. Tag them per worker if that ever confuses a report.
-  web.BroadcastChannel('livekit-e2ee-worker-log').onmessage = (web.MessageEvent event) {
-    final data = event.data.dartify() as Map;
-    final value = (data['level'] as num).toInt();
-    logger.log(
-      Level.LEVELS.firstWhere((level) => level.value == value, orElse: () => Level.INFO),
-      data['message'],
-    );
-  }.toJS;
+  // This page's worker only, which flutter_webrtc creates here. Its messages are
+  // delivered after this task, so none are missed.
+  FrameCryptorFactoryImpl.instance.worker.addEventListener(
+    'message',
+    (web.MessageEvent event) {
+      final data = event.data.dartify();
+      if (data is! Map || data['type'] != 'log') return;
+      final value = (data['level'] as num).toInt();
+      logger.log(
+        Level.LEVELS.firstWhere((level) => level.value == value, orElse: () => Level.INFO),
+        data['message'],
+      );
+    }.toJS,
+  );
 }
 
 bool isScriptTransformSupported() {
