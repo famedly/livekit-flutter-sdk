@@ -17,8 +17,12 @@ import 'dart:js_interop_unsafe';
 
 import 'package:flutter/foundation.dart' show defaultTargetPlatform, TargetPlatform;
 
+// ignore: implementation_imports
+import 'package:dart_webrtc/src/frame_cryptor_impl.dart' show FrameCryptorFactoryImpl;
+import 'package:logging/logging.dart' show Level;
 import 'package:web/web.dart' as web;
 
+import '../../logger.dart';
 import '../platform.dart';
 
 PlatformType lkPlatformImplementation() => PlatformType.web;
@@ -32,6 +36,30 @@ bool lkE2EESupportedImplementation() {
 }
 
 bool lkPlatformIsTestImplementation() => false;
+
+bool _forwardingE2EEWorkerLogs = false;
+
+void lkForwardE2EEWorkerLogsImplementation() {
+  if (_forwardingE2EEWorkerLogs) return;
+  _forwardingE2EEWorkerLogs = true;
+  // The check flutter_webrtc uses to pick the API.
+  final scriptTransform = web.window.hasProperty('RTCRtpScriptTransform'.toJS).toDart;
+  logger.info('E2EE frames go through ${scriptTransform ? 'RTCRtpScriptTransform' : 'createEncodedStreams'}');
+  // This page's worker only, which flutter_webrtc creates here. Its messages are
+  // delivered after this task, so none are missed.
+  FrameCryptorFactoryImpl.instance.worker.addEventListener(
+    'message',
+    (web.MessageEvent event) {
+      final data = event.data.dartify();
+      if (data is! Map || data['type'] != 'log') return;
+      final value = (data['level'] as num).toInt();
+      logger.log(
+        Level.LEVELS.firstWhere((level) => level.value == value, orElse: () => Level.INFO),
+        data['message'],
+      );
+    }.toJS,
+  );
+}
 
 bool isScriptTransformSupported() {
   return web.window.hasProperty('RTCRtpScriptTransform'.toJS).isDefinedAndNotNull;

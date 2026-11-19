@@ -18,6 +18,7 @@ import 'dart:typed_data';
 import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
 
 import '../logger.dart';
+import '../support/platform.dart';
 
 const defaultRatchetSalt = 'LKFrameEncryptionKey';
 const defaultMagicBytes = 'LK-ROCKS';
@@ -90,6 +91,8 @@ class BaseKeyProvider implements KeyProvider {
       keyRingSize: keyRingSize ?? defaultKeyRingSize,
       discardFrameWhenCryptorNotReady: discardFrameWhenCryptorNotReady ?? defaultDiscardFrameWhenCryptorNotReady,
     );
+    // Before the line below starts the web worker, so its first lines are kept.
+    lkForwardE2EEWorkerLogs();
     final keyProvider = await rtc.frameCryptorFactory.createDefaultKeyProvider(options);
     return BaseKeyProvider(keyProvider, options);
   }

@@ -36,6 +36,9 @@ bool lkPlatformSupportsExplicitAudioRecordingStart() =>
 
 bool lkPlatformSupportsE2EE() => lkE2EESupportedImplementation();
 
+/// Web only: relays the E2EE worker's log records to [logger].
+void lkForwardE2EEWorkerLogs() => lkForwardE2EEWorkerLogsImplementation();
+
 bool lkPlatformIsTest() => lkPlatformIsTestImplementation();
 
 BrowserType lkBrowser() => lkBrowserImplementation();
