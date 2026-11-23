@@ -12,11 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import 'dart:async';
 import 'dart:js_interop';
 import 'dart:js_interop_unsafe';
 
 import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
 import 'package:web/web.dart' as web;
+
+import '../../logger.dart';
 
 // ignore: implementation_imports
 import 'package:dart_webrtc/src/media_stream_track_impl.dart'; // import_sorter: keep
@@ -95,7 +98,14 @@ void setSinkId(String id, String deviceId) {
   if (el != null && el.instanceOfString('HTMLAudioElement')) {
     final audio = el as web.HTMLAudioElement;
     if (audio.hasProperty('setSinkId'.toJS).toDart) {
-      audio.setSinkId(deviceId);
+      // Safari refuses this without a user gesture, and the audio keeps
+      // playing on the default output, so the rejection is only logged.
+      unawaited(
+        audio.setSinkId(deviceId).toDart.catchError((Object e) {
+          logger.warning('Could not set the audio output device: $e');
+          return null;
+        }),
+      );
     }
   }
 }
